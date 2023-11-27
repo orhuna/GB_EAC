@@ -1,0 +1,21 @@
+No.	Strike	Dip	Dip Quad	Longitude	Latitude	Elevation	Units	Day	Month	Year	Notes
+1	193	90	N	0	0	0	0				
+2	193	90	N	0	0	0	0				
+3	193	90	N	0	0	0	0				
+4	193	90	N	0	0	0	0				
+5	193	90	N	0	0	0	0				
+											
+											
+											
+											
+											
+											
+											
+											
+											
+											
+											
+											
+											
+											
+											

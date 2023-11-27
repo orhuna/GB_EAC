@@ -1,0 +1,636 @@
+---
+title: "R Notebook for Graph-Based Evidence Accumulation for Clustering 3D Orientation
+  Measurements Under Relational Constraints"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r import libraries}
+suppressMessages(library(caret))
+suppressMessages(library(cluster))
+suppressMessages(library(expm))
+suppressMessages(library(Directional))
+suppressMessages(library(dplyr))
+suppressMessages(library(ggplot2))
+suppressMessages(library(geostats))
+suppressMessages(library(gridExtra))
+suppressMessages(library(igraph))
+suppressMessages(library(latex2exp))
+suppressMessages(library(matrixcalc))
+suppressMessages(library(matrixStats))
+suppressMessages(library(Spectrum))
+suppressMessages(library(tools))
+suppressMessages(library(RColorBrewer))
+suppressMessages(library(movMF))
+suppressMessages(library(powerplus))
+suppressMessages(library(diptest))
+suppressMessages(library(lsa))
+suppressMessages(library(stringi))
+suppressMessages(library(rstudioapi))
+suppressMessages(library(scales))
+
+root <- dirname(getSourceEditorContext()$path)
+```
+
+```{r read scanline data}
+df.all <- data.frame()
+for (f in list.files(file.path(getwd(), "data"))){
+  ## Get File and Location Name
+  loc.str <- tools::file_path_sans_ext(f)
+  fam.name <- strsplit(loc.str, "_")[[1]][1]
+  ## Read Compaction Band Data
+  df <- read.table(file.path(getwd(), "data", f), fill=TRUE, header=TRUE)
+  ## Drop Blank Columns
+  df <- df[,1:8]
+  ## Add Location Name Field
+  df['Family'] <- fam.name
+  ## Add to Full Dataframe
+  df.all <- rbind(df.all, df)
+}
+
+df.all[df.all$Strike<180,"Strike"] <- df.all[df.all$Strike<180,"Strike"] + 180
+head(df.all)
+```
+```{r accumulate clustering evidence with cosine dissimilarity}
+unit_vector <- function(df, degrees= T){
+  if (degrees){
+    strike <- df['Strike']*pi/180
+    dip <- df['Dip']*pi/180
+  }
+  
+  u <- sin(strike) * sin(dip)
+  v <- -cos(strike) * sin(dip)
+  z <- cos(dip)
+
+  u.vec<- as.matrix(cbind(u,v,z))
+  dimnames(u.vec) <- NULL
+  
+  return(u.vec)
+  
+}
+
+angular.similarity <- function(df){
+  
+  n <- dim(df)[1]
+  sim.mat <- matrix(data = 0, nrow = n, ncol = n)
+  
+  ## Define Upper Triangle
+  u.vec <- unit_vector(df)
+  dot.p <- combn(nrow(u.vec), 2, function(x) u.vec[x[1], ]%*%u.vec[x[2],] )[,,]
+  norm2 <- combn(nrow(u.vec), 2, 
+                 function(x) norm(u.vec[x[1],], type="2")*norm(u.vec[x[2],],
+                                                               type="2") )
+  
+  sim.mat <- cosine(t(u.vec))
+  return(sim.mat)
+}
+
+plot_stereonet_clusters <- function(df, k_inds, strike.field, dip.field){
+  pallate <- brewer.pal.info[brewer.pal.info$category == 'Set1',]
+  col_vector <- unlist(mapply(brewer.pal, length(unique(k_inds)), "RdYlBu"))
+  
+  cols <- sample(col_vector, length(unique(k_inds)))
+  
+  names(cols) <- unique(k_inds)
+  
+  geostats:::stereonet.setup(wulff = T, show.grid = T, grid.col = "grey50",
+                             option =2, tl = 0.1)
+  
+  for (i in seq(1, dim(df.all)[1])){
+    
+    geostats:::stereonet.plane(df[i,strike.field]*pi/180, df[i,dip.field]*pi/180,
+                               wulff = T, pch = 21, col=cols[toString(k_inds[i])],
+                               bg=cols[toString(k_inds[i])], lwd = 2)
+  
+    }
+}
+## Modified from Geostats. Fixed Xlim Bug
+stereonet.setup <- function(wulff=TRUE,show.grid=TRUE,
+                            grid.col='grey50',tl=0.05, alpha=1,...){
+    intrad <- 10*pi/180
+    east <- pi/2
+    west <- 3*east
+    TH <- (0:360)*pi/180
+    
+    #graphics::plot(x=cos(TH),y=sin(TH),type='l',asp=1,
+                   #bty='n',axes=FALSE,ann=FALSE, frame.plot=T)
+    
+    plot(NULL, xlim=c(-1, 1), ylim=c(-1, 1), bty='n',
+         xaxs="i", yaxs="i",
+         axes=FALSE, frame.plot=F)
+    
+    if (show.grid){
+        nCircles <- pi/(intrad*2)
+        trd <- 0.0
+        plg <- 0.0
+        for (i in 1:nCircles){
+            coneAngle <- i*intrad;
+            paths <- geostats:::SmallCircle(trd,plg,coneAngle,wulff=wulff)
+            graphics::lines(paths$path1,lty=1,col=alpha(grid.col, alpha))
+            graphics::lines(paths$path2,lty=1,col=alpha(grid.col, alpha))
+        }
+        for (i in 0:(nCircles*2)){
+            if (i > nCircles){
+                trd <- east
+                plg <- (i-nCircles)*intrad
+            } else {
+                trd <- west
+                plg <- i*intrad
+            }
+            if (plg == east){
+                plg <- plg * (1-.Machine$double.min)
+            }
+            sd <- geostats:::pole(trd,plg,option=1)
+            p <- geostats:::GreatCircle(sd[1],sd[2],wulff=wulff)
+            graphics::lines(p[,1],p[,2],lty=1,col=alpha(grid.col, alpha))
+        }
+
+    }
+    graphics::lines(c(0,0),c(1,1+tl))
+    graphics::lines(c(0,0),-c(1,1+tl))
+    graphics::lines(c(1,1+tl),c(0,0))
+    graphics::lines(-c(1,1+tl),c(0,0))
+    graphics::text(0,1+tl,labels='N',pos=3,xpd=NA,offset=0.1)
+    graphics::text(1+tl,0,labels='E',pos=4,xpd=NA,offset=0.1)
+    graphics::text(0,-1-tl,labels='S',pos=1,xpd=NA,offset=0.1)
+    graphics::text(-1-tl,0,labels='W',pos=2,xpd=NA,offset=0.1)
+}
+
+stereonet.line <- function(trd,plg,wulff=TRUE,pch=21,
+                           bg=c('black','white'),lty=c(1,2), p.col='black',
+                           ...){
+    theta <- trd
+    if (wulff) rho <- tan((pi/4)-(plg/2))
+    else rho <- sqrt(2)*sin((pi/4)-(plg/2))
+    xp <- rho*sin(theta)
+    yp <- rho*cos(theta)
+    graphics::points(xp,yp,pch=pch,bg=bg,lty=lty, col=p.col,...)
+}
+
+stereonet.plane <- function(trd,plg,wulff=TRUE,pch=21,
+                            bg=c('black','white'),lty=c(1,2),
+                            col='black', p.col='black',...){
+  
+    for (i in 1:length(trd)){
+        above <- (sin(plg[i])<0)
+        ad <- geostats:::pole(trd=trd[i],plg=plg[i],option=2)
+        stereonet.line(trd=ad[1],plg=ad[2],wulff=wulff,
+                       pch=pch,bg=bg[above+1],p.col=p.col, ...)
+        if (plg[i]!=0){
+            xy <- geostats:::GreatCircle(strike=trd[i],dip=plg[i],wulff=wulff)
+            graphics::lines(xy,lty=lty[above+1],col=col,...)
+        }
+    }
+}
+
+plot.clusters <- function(df, inds, col.str, col.dip, n.col, nrow, save.dir, 
+                          col=NULL){
+  
+  ext <- file_ext(save.dir)
+  
+  if (ext == 'png'){
+    png(file=save.dir)
+  }else if(ext =='jpeg'){
+    jpeg(file=save.dir)
+  }
+  
+  par(mfrow=c(n.row,n.col),
+      mar = c(1.5, 1.5, 1.5, 1.5),
+      cex = 1.25)
+  
+  n.inds <- length(unique(inds))
+  
+  if (is.null(col)){
+    col_vector <- unlist(mapply(brewer.pal, n.inds, "Set3"))
+  
+    if(length(col_vector) < n.inds ){
+      cols <- sample(col_vector, length(col_vector))
+      cols <- rep(cols, ceiling(n.inds/length(col_vector)))
+    }else{
+      cols <- sample(col_vector, length(unique(k_inds)))
+  }
+  }else{
+    cols <- rep(cols, ceiling(n.inds/length(cols)))
+  }
+  
+  for (ind in unique(inds)){
+    df.plot <- df[which(inds==ind),]
+    stereonet.setup(wulff = T, show.grid = T, grid.col = "grey50",
+                                 option =2, tl = 0.01, alpha= 0.5)
+  
+    for (i in seq(1, dim(df.all)[1])){
+    stereonet.plane(df.all[i, col.str]*pi/180, df.all[i, col.dip]*pi/180,
+                    wulff = T,  pch = 5, lwd = 1,
+                    col = alpha('black', 0.1),
+                    p.col = alpha('black', 0.1))
+    }
+    
+    for (j in seq(1,dim(df.plot)[1])){
+      clust.col <- alpha(cols[ind], 0.5)
+      
+      stereonet.plane(df.plot[j, col.str]*pi/180, df.plot[j, col.dip]*pi/180,
+                      wulff = T,  pch = 5, lwd = 2,
+                      col = clust.col, p.col=clust.col)
+    }
+  }
+  
+  if (ext == 'svg'){
+    dev.copy(svg, save.dir)
+  }
+  
+  dev.off()
+  
+  return(cols)
+}
+```
+
+```{r Adjacency Matrix}
+df <- df.all
+mode <- 'cross-scanline'
+mode <- 'col'
+param <- 'Family'
+
+low.edge.val <- 0.01
+cross.edge.val <- 0.5
+high.edge.val <- 1
+
+adj.mat <- matrix(low.edge.val, nrow=dim(df)[1], ncol=dim(df)[1])
+
+if(mode == "col"){
+  for (l in unique(df.all[param])[,1])
+    {
+    inds <- which(df.all[param] == l)
+    adj.mat[inds, inds] <- high.edge.val
+    }
+  }else if(mode=="cross-scanline" || mode=="scanline"){
+    fam.list <- unique(df.all[param])[,1]
+    
+    for (i in seq(1, length(fam.list))){
+      ind.1 <- which(df.all[param] == fam.list[i])
+      ## Cross-Group
+      if(mode=="cross-scanline"){
+        for (j in seq(i+1, length(fam.list))){
+          ind.2 <- which(df.all[param] == fam.list[j])
+          adj.mat[ind.1, ind.2] <- cross.edge.val
+        }
+        
+        if(length(ind.1) >0){
+          for (s.1 in seq(1,length(ind.1))){
+            for (s.2 in seq(1,length(ind.1))){
+              adj.mat[ind.1[s.1], ind.1[s.2]] <- high.edge.val
+            }
+          }
+        }
+      }else if(mode=='scanline'){
+      ## Along Scanline
+      if(length(ind.1) >0){
+        for (s.1 in seq(1,length(ind.1)-1)){
+          adj.mat[ind.1[s.1], ind.1[s.1+1]] <- high.edge.val
+        }
+      }
+      }
+    }
+    #adj.mat <-  adj.mat + t(adj.mat)
+    diag(adj.mat) <- 1
+    adj.mat[which(adj.mat==0)] <- low.edge.val
+
+  }else if(mode=='full')
+    {
+    adj.mat <- matrix(1, nrow=dim(df)[1], ncol=dim(df)[1])
+  } else if(mode=='site'){
+    adj.mat[1:60, 1:60] <- 1
+    adj.mat[61:199, 61:199] <- 1
+  }
+
+
+```
+
+```{r build evidence graph under constraints}
+sim.mat <- angular.similarity(df.all)
+
+d.mat <- 1 - sim.mat
+
+u.vec <- unit_vector(df.all)
+
+n <- dim(u.vec)[1]
+
+max.k <- 100
+
+ev.mat <- matrix(0, nrow=n, ncol= n)
+
+for (k in seq(2, max.k)){
+
+  inds <- pam(x=d.mat, k, diss=T)$clustering
+  
+  for (ind in unique(inds)){
+    ev.i <- which(inds == ind)
+    ev.mat[ev.i, ev.i] <- ev.mat[ev.i, ev.i] + 1
+  }
+}
+
+ev.mat.w <- hadamard.prod(adj.mat, ev.mat)
+ev.mat.w <- ev.mat.w / (max.k-1)
+```
+
+```{r Find Optimum Number of Clusters - Spectral Gap}
+#degree.mat <- diag(rowSums(ev.mat>0))
+p.ev.mat <- ev.mat.w
+
+degree.mat <- diag(apply(p.ev.mat, 1, sum))
+
+L.unnorm <- degree.mat - p.ev.mat
+
+L.norm.rw <- Matpow(degree.mat, -1) %*% L.unnorm
+
+eig.lap <- eigen(L.norm.rw, symmetric=TRUE)
+```
+
+```{r search optimal number of clusters}
+max.x <- 20
+x.step <- 1
+eig.v.df <- data.frame(Eigenvalues=rev(eig.lap$values),
+                       Dimensions = seq(1, length(eig.lap$values)))
+eig.v.df['Eigenvalues'] <- rev(eig.lap$values)
+lambda.diff <- diff(eig.v.df$Eigenvalues, lag = 1, differences = 1)
+eig.v.df['dE'] <- c(0, lambda.diff)
+
+k.opt <- which(lambda.diff==max(lambda.diff[1:max.k] ))
+
+df.opt <- data.frame(Eigenvalues= c(0, max(eig.v.df[1:max.x,]$Eigenvalues)),
+                     Dimensions = rep(k.opt, 2))
+
+f1<- ggplot(data=eig.v.df[1:max.x,], aes(Dimensions, Eigenvalues))+
+  geom_point(size=4) +
+  geom_line(size = 2, alpha = 0.5)  +
+  geom_line(data=df.opt, aes(Dimensions, Eigenvalues), color='gray50',
+            size = 1, linetype=2) +
+  theme_light() +
+  theme(text = element_text(size=16),
+        axis.text.x = element_text(size=14, angle=0),
+        axis.text.y = element_text(size=14, angle=0),
+        legend.position = c(0.7, 0.8), legend.box = "horizontal",
+        legend.background = element_rect(fill='transparent'),
+        ) +
+  scale_x_continuous(breaks=seq(1, max.x, x.step),
+                     minor_breaks = seq(1, max.x, x.step)) +
+  scale_y_continuous(breaks=seq(0, 1, 0.1), minor_breaks = NULL) +
+  labs(x = 'Dimension',
+       y= TeX("Eigenvalue($\\lambda$)"))
+
+df.opt <- data.frame(Eigenvalues= c(0, max(eig.v.df[1:max.x,]$dE)),
+                     Dimensions = rep(k.opt, 2))
+
+f2 <- ggplot(data=eig.v.df[1:max.x,], aes(Dimensions, dE))+
+  geom_point(size=4) +
+  geom_line(size = 2, alpha = 0.5) +
+  geom_line(data=df.opt, aes(Dimensions, Eigenvalues), color='gray50',
+            size = 1, linetype=2)+
+  theme_light() +
+  theme(text = element_text(size=16),
+        axis.text.x = element_text(size=14, angle=0),
+        axis.text.y = element_text(size=14, angle=0),
+        legend.position = c(0.7, 0.8), legend.box = "horizontal",
+        legend.background = element_rect(fill='transparent'),
+        ) +
+  scale_x_continuous(breaks=seq(1, max.x, x.step),
+                     minor_breaks = seq(1, max.x, x.step)) +
+  labs(x = 'Dimension',
+       y= TeX("$\\Delta$$\\lambda$"))
+
+```
+
+```{r Spectral Clustering on k}
+N <- ncol(eig.lap$vectors)
+
+mat.spec <- eig.lap$vectors[, N:(N-k.opt+1)]
+
+mat.spec.row.sd <- mat.spec / sqrt(apply(mat.spec**2, 1, sum))
+
+inds.ev <- pam(x=mat.spec, k.opt, diss=F)$clustering
+
+inds.ev <- pam(d.mat, k.opt, diss=T)$clustering
+```
+
+```{r plot clusters}
+df<- df.all
+inds <- inds.ev
+
+n.col <- 4
+n.row <- 4
+col.str <- "Strike"
+col.dip <- "Dip"
+cols <- c("#E41A1C","#377EB8", "#ff33f3", "#4DAF4A", "#984EA3",
+            "#FF7F00","#A65628", "#F781BF", "#33ffff", "#f5ca1a")
+
+save.dir <- file.path(root, "figs", paste0(mode,'_new_clusters.svg'))
+
+cols <- plot.clusters(df, inds, col.str, col.dip, n.col, nrow, col = cols, save.dir)
+
+save.dir <- file.path(root, "figs", paste0(mode,'_new_clusters.png'))
+
+cols <- plot.clusters(df, inds, col.str, col.dip, n.col, nrow, col = cols, save.dir)
+
+```
+
+```{r scanline plot for vMF clusters }
+df.all['FamilyCode'] <- as.numeric(factor(df.all$Family))
+df.all['X'] <- seq(1, dim(df.all)[1])
+
+colors <- rep(0, length(inds))
+
+id <- 1
+for (fam in unique(inds)){
+  colors[inds==fam] <- cols[id]
+  
+  id <- id + 1
+}
+
+fam <- unique(df.all$Family)[1]
+
+ggplot(df.all, aes(x=X, y=Family)) +
+  geom_point(size=2, color=colors) +
+  theme_light() +
+  theme(text = element_text(size=16),
+        axis.text.x = element_text(size=14, angle=0),
+        axis.text.y = element_text(size=14, angle=0),
+        legend.position = c(0.7, 0.8), legend.box = "horizontal",
+        legend.background = element_rect(fill='transparent'),
+        ) +
+  labs(x = 'Scanline ID',
+       y= "Site Name")
+
+```
+
+```{r Eigenvalue Dip test}
+for (col.id in seq(1,ncol(eig.lap$vectors))){
+  d.test <- dip.test(eig.lap$vectors[,col.id],
+                     simulate.p.value = F)
+}
+```
+
+
+```{r define clusters with vMf with varying k}
+list.BIC <- c()
+vMF.models <- c()
+max.k <- 20
+
+for (k in seq(2,max.k)){
+  mix.vMF <- NULL
+  iter <- 0
+    while( is.null(mix.vMF)  & iter<10000 ){
+      iter <- iter + 1
+      try(
+        mix.vMF <- movMF(u.vec, k, kappa = "Banerjee_et_al_2005", verbose=F,
+                      converge = T, n.start = 40),
+        silent = TRUE
+      )
+  }
+  
+  vMF.models[[k-1]] <- mix.vMF
+  
+  }
+```
+
+
+```{r Evaluate vMF Models k with BIC}
+list.BIC <- c()
+model.k <- 2
+for (model in vMF.models){
+  list.BIC <- append(list.BIC, -BIC(model))
+}
+
+df.opt <- data.frame(BIC= list.BIC,
+                     k = seq(2,max.k))
+
+f <- ggplot(data=df.opt, aes(k, BIC))+
+  geom_point(size=4) +
+  geom_line(size = 2, alpha = 0.5) +
+  geom_line(data=df.opt, aes(k, BIC), color='gray50',
+            size = 1, linetype=2)+
+  theme_light() +
+  theme(text = element_text(size=16),
+        axis.text.x = element_text(size=14, angle=0),
+        axis.text.y = element_text(size=14, angle=0)) +
+  labs(x = 'Number of Clusters (k)',
+       y= TeX("$BIC$"))
+
+f
+```
+
+```{r vMF Optimized}
+  ## Optimal Number of Clusters per BIC
+  k.opt.vMF <- 10
+  ## Optimal vMF model
+  model.opt.vMF <- vMF.models[k.opt.vMF-1]
+  #clust.ind <- predict(mix.vMF, u.vec, type='class_ids')
+  inds <- predict(model.opt.vMF, u.vec, type='class_ids')[[1]]
+  
+  df<- df.all
+  
+  n.col <- 4
+  n.row <- 4
+  col.str <- "Strike"
+  col.dip <- "Dip"
+  cols <- c("#E41A1C","#377EB8", "#ff33f3", "#4DAF4A", "#984EA3",
+            "#FF7F00","#A65628", "#F781BF", "#33ffff", "#f5ca1a")
+  
+  save.dir <- file.path(root, "figs", 'vmf_clusters.svg')
+  
+  cols <- plot.clusters(df, inds, col.str, col.dip, n.col, nrow, col = cols, save.dir)
+  
+  save.dir <- file.path(root, "figs", 'vmf_clusters.png')
+  
+  cols <- plot.clusters(df, inds, col.str, col.dip, n.col, nrow, col = cols, save.dir)
+  cols <- cols[unique(inds)]
+```
+```{r Plot vMF Clusters on the Scanline}
+df.all['FamilyCode'] <- as.numeric(factor(df.all$Family))
+df.all['X'] <- seq(1, dim(df.all)[1])
+
+colors <- rep(0, length(inds))
+
+id <- 1
+for (fam in unique(inds)){
+  colors[inds==fam] <- cols[id]
+  
+  id <- id + 1
+}
+
+fam <- unique(df.all$Family)[1]
+
+ggplot(df.all, aes(x=X, y=Family)) +
+  geom_point(size=2, color=colors) +
+  theme_light() +
+  theme(text = element_text(size=16),
+        axis.text.x = element_text(size=14, angle=0),
+        axis.text.y = element_text(size=14, angle=0),
+        legend.position = c(0.7, 0.8), legend.box = "horizontal",
+        legend.background = element_rect(fill='transparent'),
+        ) +
+  labs(x = 'Scanline ID',
+       y= "Site Name")
+
+```
+
+```{r vMF for four clusters}
+  ## Optimal Number of Clusters per BIC
+  k.opt.vMF <- 4
+  ## Optimal vMF model
+  model.opt.vMF <- vMF.models[k.opt.vMF-1]
+  #clust.ind <- predict(mix.vMF, u.vec, type='class_ids')
+  inds <- predict(model.opt.vMF, u.vec, type='class_ids')[[1]]
+  
+  df<- df.all
+  
+  n.col <- 2
+  n.row <- 2
+  col.str <- "Strike"
+  col.dip <- "Dip"
+  cols <- c("#E41A1C","#377EB8", "#4DAF4A", "#984EA3", "#ff33f3",
+            "#FF7F00","#A65628", "#F781BF", "#33ffff", "#f5ca1a")
+  
+  inds <- inds + k.opt.vMF
+  u.inds <- unique(inds)
+  for(i in seq(1,k.opt.vMF)){
+    inds[inds==u.inds[i]] = i
+  }
+  
+  
+  save.dir <- file.path(root, "figs", 'vmf4_clusters.svg')
+  
+  cols <- plot.clusters(df, inds, col.str, col.dip, n.col, nrow, col = cols, save.dir)
+  
+  save.dir <- file.path(root, "figs", 'vmf4_clusters.png')
+  
+  cols <- plot.clusters(df, inds, col.str, col.dip, n.col, nrow, col = cols, save.dir)
+  cols <- cols[unique(inds)]
+
+  
+df.all['FamilyCode'] <- as.numeric(factor(df.all$Family))
+df.all['X'] <- seq(1, dim(df.all)[1])
+
+colors <- rep(0, length(inds))
+
+id <- 1
+for (fam in unique(inds)){
+  colors[inds==fam] <- cols[id]
+  
+  id <- id + 1
+}
+
+fam <- unique(df.all$Family)[1]
+
+ggplot(df.all, aes(x=X, y=Family)) +
+  geom_point(size=2, color=colors) +
+  theme_light() +
+  theme(text = element_text(size=16),
+        axis.text.x = element_text(size=14, angle=0),
+        axis.text.y = element_text(size=14, angle=0),
+        legend.position = c(0.7, 0.8), legend.box = "horizontal",
+        legend.background = element_rect(fill='transparent'),
+        ) +
+  labs(x = 'Scanline ID',
+       y= "Site Name")
+
+```
